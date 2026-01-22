@@ -4,18 +4,28 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Optional, Tuple
 
+import math
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.3"
 
 # Pacific Northwest scope (edit if you want to expand)
 PNW_COUNTRY_CODE = "US"
 PNW_ALLOWED_STATES = {"Washington", "Oregon", "Idaho", "Montana"}
+
+# Bias defaults: North Idaho + Eastern WA
+# We rank search results closer to Coeur d'Alene and prefer ID + Eastern WA.
+CDA_LAT = 47.6777
+CDA_LON = -116.7805
+EASTERN_WA_LON_MIN = -121.5  # rough Cascades split
+
+# Lock display timezone for PNW
 FORECAST_TIMEZONE = "America/Los_Angeles"
 
 
@@ -32,7 +42,6 @@ def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
 
 
 def mph_from(value: float, unit: str) -> float:
-    # Open-Meteo supports windspeed_unit: mph, ms, kmh, kn
     if unit == "mph":
         return float(value)
     if unit == "kmh":
@@ -61,48 +70,94 @@ def safe_float_list(x) -> List[float]:
     return [float(v) if v is not None else float("nan") for v in x]
 
 
-def worst_window(times: List[str], sustained_mph: List[float], gusts_mph: List[float]) -> Optional[dict]:
-    # Find worst 3-hour window by average wind score
-    if not times or not sustained_mph or not gusts_mph:
-        return None
+def status_color(status: str) -> str:
+    if status == "GO":
+        return "#1b8f3a"
+    if status == "CAUTION":
+        return "#c08a00"
+    return "#b00020"
 
-    n = min(len(times), len(sustained_mph), len(gusts_mph))
-    if n < 3:
-        return None
 
-    scores = []
-    for i in range(n):
-        s = sustained_mph[i]
-        g = gusts_mph[i]
-        if s != s or g != g:
-            scores.append(None)
-        else:
-            gustiness = max(0.0, g - s)
-            scores.append(4.0 * s + 2.0 * gustiness)
+def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    # Great-circle distance
+    r = 3958.7613  # Earth radius in miles
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
 
-    best = None
-    for i in range(0, n - 2):
-        window = scores[i : i + 3]
-        if any(v is None for v in window):
-            continue
-        avg = sum(window) / 3.0
-        if (best is None) or (avg > best["avg_score"]):
-            best = {
-                "start": times[i],
-                "end": times[i + 2],
-                "avg_score": avg,
-                "sustained_avg": sum(sustained_mph[i : i + 3]) / 3.0,
-                "gust_avg": sum(gusts_mph[i : i + 3]) / 3.0,
-            }
-    return best
+    a = math.sin(dlat / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return r * c
+
+
+def region_rank(lat: float, lon: float, admin1: str) -> int:
+    """
+    Lower is better (rank).
+    0: North Idaho (Idaho + lat >= 46)
+    1: Eastern WA (Washington + lon >= EASTERN_WA_LON_MIN)
+    2: Other Idaho
+    3: Other Washington
+    4: Montana
+    5: Oregon
+    9: Everything else (should not happen due to filtering)
+    """
+    a = (admin1 or "").strip()
+    if a == "Idaho":
+        if lat >= 46.0:
+            return 0
+        return 2
+    if a == "Washington":
+        if lon >= EASTERN_WA_LON_MIN:
+            return 1
+        return 3
+    if a == "Montana":
+        return 4
+    if a == "Oregon":
+        return 5
+    return 9
+
+
+def sort_results_bias(results: List[dict]) -> List[dict]:
+    """
+    Sort by:
+      1) Region rank (North Idaho + Eastern WA first)
+      2) Distance to Coeur d'Alene (closer first)
+      3) Population (higher first, if present)
+    """
+    scored: List[Tuple[Tuple[int, float, int], dict]] = []
+    for r in results:
+        try:
+            lat = float(r.get("latitude", 0.0))
+            lon = float(r.get("longitude", 0.0))
+        except Exception:
+            lat = 0.0
+            lon = 0.0
+
+        admin1 = (r.get("admin1") or "").strip()
+        rank = region_rank(lat, lon, admin1)
+        dist = haversine_miles(CDA_LAT, CDA_LON, lat, lon)
+
+        pop = r.get("population")
+        try:
+            pop_i = int(pop) if pop is not None else 0
+        except Exception:
+            pop_i = 0
+
+        # For sorting, population should be descending; we store negative.
+        scored.append(((rank, dist, -pop_i), r))
+
+    scored.sort(key=lambda x: x[0])
+    return [r for _, r in scored]
 
 
 def geocode_place_pnw(place: str) -> List[dict]:
     """
-    Uses Open-Meteo geocoding and filters to PNW states only.
+    Open-Meteo geocoding, filtered to PNW states, then sorted with a bias
+    toward North Idaho + Eastern Washington (and closer to Coeur d'Alene).
     """
     url = "https://geocoding-api.open-meteo.com/v1/search"
-    params = {"name": place, "count": 12, "language": "en", "format": "json"}
+    params = {"name": place, "count": 15, "language": "en", "format": "json"}
     data = http_get_json(url, params=params)
     results = data.get("results") or []
 
@@ -110,11 +165,29 @@ def geocode_place_pnw(place: str) -> List[dict]:
     for r in results:
         country_code = (r.get("country_code") or "").strip()
         admin1 = (r.get("admin1") or "").strip()
-        # Keep only US PNW state results
         if country_code == PNW_COUNTRY_CODE and admin1 in PNW_ALLOWED_STATES:
             filtered.append(r)
 
-    return filtered
+    return sort_results_bias(filtered)
+
+
+def reverse_geocode_pnw(lat: float, lon: float) -> Optional[dict]:
+    """
+    Reverse geocode to a nearest place name and confirm it is PNW.
+    """
+    url = "https://geocoding-api.open-meteo.com/v1/reverse"
+    params = {"latitude": lat, "longitude": lon, "language": "en", "format": "json"}
+    data = http_get_json(url, params=params)
+    results = data.get("results") or []
+    if not results:
+        return None
+
+    r = results[0]
+    country_code = (r.get("country_code") or "").strip()
+    admin1 = (r.get("admin1") or "").strip()
+    if country_code == PNW_COUNTRY_CODE and admin1 in PNW_ALLOWED_STATES:
+        return r
+    return None
 
 
 def fetch_forecast(lat: float, lon: float, wind_unit: str) -> dict:
@@ -123,7 +196,7 @@ def fetch_forecast(lat: float, lon: float, wind_unit: str) -> dict:
         "latitude": lat,
         "longitude": lon,
         "timezone": FORECAST_TIMEZONE,
-        "windspeed_unit": wind_unit,  # mph, kn, kmh, ms
+        "windspeed_unit": wind_unit,
         "temperature_unit": "fahrenheit",
         "precipitation_unit": "inch",
         "hourly": ",".join(
@@ -149,7 +222,7 @@ def fetch_forecast(lat: float, lon: float, wind_unit: str) -> dict:
                 "sunset",
             ]
         ),
-        "forecast_days": 3,
+        "forecast_days": 7,
     }
     return http_get_json(url, params=params)
 
@@ -175,21 +248,54 @@ def filter_to_day(hourly: dict, target: date) -> dict:
     return out
 
 
-def pick_day_label(target: date) -> str:
-    today = date.today()
-    if target == today:
-        return "Today"
-    if target == today + timedelta(days=1):
-        return "Tomorrow"
-    return target.isoformat()
+def compute_status(sustained_mph: float, gust_mph: float, offshore: bool, big_water: bool) -> str:
+    # Fixed, conservative thresholds (no end-user tuning)
+    # GO: sustained 0-10 and gust <= 15
+    # CAUTION: sustained 11-15 or gust 16-22
+    # DO NOT GO: sustained >= 16 or gust >= 23
+    status = "GO"
+    if sustained_mph >= 16 or gust_mph >= 23:
+        status = "DO NOT GO"
+    elif sustained_mph >= 11 or gust_mph >= 16:
+        status = "CAUTION"
+
+    # Optional bumpers (OFF by default in UI)
+    if status != "DO NOT GO":
+        if offshore:
+            status = "CAUTION" if status == "GO" else "DO NOT GO"
+        if big_water:
+            status = "CAUTION" if status == "GO" else "DO NOT GO"
+
+    return status
 
 
-def status_color(status: str) -> str:
-    if status == "GO":
-        return "#1b8f3a"
-    if status == "CAUTION":
-        return "#c08a00"
-    return "#b00020"
+def worst_3hr_window(times: List[str], sustained_mph: List[float], gusts_mph: List[float]) -> Optional[dict]:
+    n = min(len(times), len(sustained_mph), len(gusts_mph))
+    if n < 3:
+        return None
+
+    best = None
+    for i in range(n - 2):
+        window_s = sustained_mph[i : i + 3]
+        window_g = gusts_mph[i : i + 3]
+        if any((v != v) for v in window_s) or any((v != v) for v in window_g):
+            continue
+
+        scores = []
+        for s, g in zip(window_s, window_g):
+            gustiness = max(0.0, g - s)
+            scores.append(4.0 * s + 2.0 * gustiness)
+
+        avg = sum(scores) / 3.0
+        if (best is None) or (avg > best["avg_score"]):
+            best = {
+                "start": times[i],
+                "end": times[i + 2],
+                "avg_score": avg,
+                "sustained_avg": sum(window_s) / 3.0,
+                "gust_avg": sum(window_g) / 3.0,
+            }
+    return best
 
 
 # ----------------------------
@@ -198,91 +304,121 @@ def status_color(status: str) -> str:
 st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
 
 st.title("Kayak Wind Advisor")
-st.caption(
-    f"Version {APP_VERSION}. Pacific Northwest only (WA, OR, ID, MT). Wind-first GO / CAUTION / DO NOT GO."
-)
+st.caption(f"Version {APP_VERSION}. PNW only (WA, OR, ID, MT). Biased to North Idaho + Eastern WA.")
 
-with st.sidebar:
-    st.subheader("Location (PNW only)")
-    place = st.text_input("Place name (city, lake, launch)", value="Coeur d'Alene")
+# Location first
+st.subheader("Location")
 
-    st.subheader("Day")
-    day_choice = st.radio("Pick a day", ["Today", "Tomorrow", "Pick a date"], index=0)
-    if day_choice == "Pick a date":
-        target_day = st.date_input("Date", value=date.today())
-    elif day_choice == "Tomorrow":
-        target_day = date.today() + timedelta(days=1)
-    else:
-        target_day = date.today()
-
-    st.subheader("Wind settings")
+colA, colB = st.columns([1, 1])
+with colA:
+    use_my_location = st.checkbox("Use my current location", value=True)
+with colB:
     wind_unit = st.selectbox("Wind units", ["mph", "kn"], index=0)
 
-    offshore = st.checkbox("Assume offshore wind risk", value=False)
-    big_water = st.checkbox("Big water (large lake, long fetch)", value=True)
+st.caption("If current location is blocked or outside the PNW filter, search by name below.")
+place_query = st.text_input("Search by place name (fallback)", value="")
 
-    st.subheader("Decision style")
-    st.caption("Conservative defaults for most recreational kayak anglers.")
-    go_max = st.slider("GO sustained max", min_value=5, max_value=15, value=10, step=1)
-    caution_max = st.slider("CAUTION sustained max", min_value=10, max_value=25, value=15, step=1)
-    go_gust_max = st.slider("GO gust max", min_value=10, max_value=25, value=15, step=1)
-    caution_gust_max = st.slider("CAUTION gust max", min_value=15, max_value=35, value=22, step=1)
+# Date: calendar only
+st.subheader("Date")
+target_day = st.date_input("Choose a date", value=date.today())
+
+# Options: do NOT assume big water
+st.subheader("Options")
+opt1, opt2 = st.columns(2)
+with opt1:
+    offshore = st.checkbox("Offshore wind risk (more conservative)", value=False)
+with opt2:
+    big_water = st.checkbox("Big water (large lake, long fetch)", value=False)
 
 st.caption(f"Forecast timezone locked to {FORECAST_TIMEZONE} (PNW local display).")
 
+# --- Browser geolocation (best effort) ---
+lat = None
+lon = None
 
-def compute_status_custom(sustained_mph: float, gust_mph: float) -> str:
-    if sustained_mph >= (caution_max + 1) or gust_mph >= (caution_gust_max + 1):
-        return "DO NOT GO"
-    if sustained_mph > go_max or gust_mph > go_gust_max:
-        return "CAUTION"
-    return "GO"
+if use_my_location:
+    components.html(
+        """
+<script>
+(async () => {
+  try {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition((pos) => {
+      const lat = pos.coords.latitude.toFixed(6);
+      const lon = pos.coords.longitude.toFixed(6);
+      const url = new URL(window.location.href);
+      url.searchParams.set("lat", lat);
+      url.searchParams.set("lon", lon);
+      window.history.replaceState({}, "", url);
+    });
+  } catch (e) {}
+})();
+</script>
+""",
+        height=0,
+    )
 
+    q = st.query_params
+    try:
+        if "lat" in q and "lon" in q:
+            lat = float(q["lat"])
+            lon = float(q["lon"])
+    except Exception:
+        lat = None
+        lon = None
 
-def apply_bump(status: str, offshore_flag: bool, big_water_flag: bool) -> str:
-    if status == "DO NOT GO":
-        return status
-    if offshore_flag or big_water_flag:
-        if status == "GO":
-            return "CAUTION"
-        if status == "CAUTION":
-            return "DO NOT GO"
-    return status
-
-
-# ----------------------------
-# Run
-# ----------------------------
-if not place.strip():
-    st.info("Enter a PNW place name to get a wind-first kayak rating.")
-    st.stop()
+# Resolve final location choice
+chosen_r = None
+chosen_label = None
 
 try:
-    results = geocode_place_pnw(place.strip())
-    if not results:
-        allowed = ", ".join(sorted(list(PNW_ALLOWED_STATES)))
-        st.error(
-            "No PNW matches found. Try a nearby town name.\n\n"
-            f"Allowed area: {PNW_COUNTRY_CODE} only, states: {allowed}."
-        )
-        st.stop()
+    # 1) Try current location (if available)
+    if lat is not None and lon is not None:
+        rev = reverse_geocode_pnw(lat, lon)
+        if rev is not None:
+            chosen_r = rev
+            chosen_label = f"{rev.get('name','')}, {rev.get('admin1','')}, {rev.get('country','')}"
+        else:
+            st.warning("Current location not confirmed in WA/OR/ID/MT. Use the search box below.")
+            lat = None
+            lon = None
 
-    label_options = []
-    for r in results:
-        name = r.get("name", "")
-        admin1 = r.get("admin1", "")
-        country = r.get("country", "")
-        lat = r.get("latitude", 0.0)
-        lon = r.get("longitude", 0.0)
-        label_options.append(f"{name}, {admin1}, {country} ({lat:.3f}, {lon:.3f})")
+    # 2) Fallback to search by name
+    if chosen_r is None:
+        if not place_query.strip():
+            st.info("Enter a place name to search (example: Coeur d'Alene, Hayden, Post Falls, Spokane Valley).")
+            st.stop()
 
-    chosen = st.selectbox("Select the best match", label_options, index=0)
-    chosen_idx = label_options.index(chosen)
-    chosen_r = results[chosen_idx]
+        results = geocode_place_pnw(place_query.strip())
+        if not results:
+            allowed = ", ".join(sorted(list(PNW_ALLOWED_STATES)))
+            st.error(
+                "No PNW matches found. Try a nearby town name.\n\n"
+                f"Allowed area: {PNW_COUNTRY_CODE} only, states: {allowed}."
+            )
+            st.stop()
 
+        label_options = []
+        for r in results:
+            name = r.get("name", "")
+            admin1 = r.get("admin1", "")
+            country = r.get("country", "")
+            rlat = r.get("latitude", 0.0)
+            rlon = r.get("longitude", 0.0)
+            dist = haversine_miles(CDA_LAT, CDA_LON, float(rlat), float(rlon))
+            # show distance hint so users see the bias working
+            label_options.append(f"{name}, {admin1}, {country} ({rlat:.3f}, {rlon:.3f}) - {int(round(dist))} mi from CDA")
+
+        chosen = st.selectbox("Select the best match", label_options, index=0)
+        idx = label_options.index(chosen)
+        chosen_r = results[idx]
+        chosen_label = chosen.split(" (")[0]
+
+    # Now we have lat/lon
     lat = float(chosen_r["latitude"])
     lon = float(chosen_r["longitude"])
 
+    # Fetch forecast
     forecast = fetch_forecast(lat, lon, wind_unit=wind_unit)
     hourly = forecast.get("hourly") or {}
     daily = forecast.get("daily") or {}
@@ -298,16 +434,15 @@ try:
     gusts_mph = [mph_from(v, wind_unit) for v in gusts_raw]
 
     if not times:
-        st.warning("No hourly data returned for that day. Try another day or location.")
+        st.warning("No hourly data returned for that date. Try another date or location.")
         st.stop()
 
     # Day-level status: worst hour (conservative)
-    worst_status = "GO"
-    worst_reason = ""
-    worst_score = -1
-    worst_i = 0
-
     rank_map = {"GO": 0, "CAUTION": 1, "DO NOT GO": 2}
+    worst_status = "GO"
+    worst_i = 0
+    worst_score = -1
+    worst_reason = ""
 
     for i in range(len(times)):
         s = sustained_mph[i]
@@ -316,8 +451,7 @@ try:
         if s != s or g != g or d != d:
             continue
 
-        base = compute_status_custom(s, g)
-        bumped = apply_bump(base, offshore, big_water)
+        st_i = compute_status(s, g, offshore=offshore, big_water=big_water)
 
         gustiness = max(0.0, g - s)
         score = int(round(4.0 * s + 2.0 * gustiness))
@@ -326,28 +460,17 @@ try:
         if big_water:
             score += 8
 
-        if (rank_map[bumped] > rank_map[worst_status]) or (
-            rank_map[bumped] == rank_map[worst_status] and score > worst_score
-        ):
-            worst_status = bumped
-            worst_score = score
+        if (rank_map[st_i] > rank_map[worst_status]) or (rank_map[st_i] == rank_map[worst_status] and score > worst_score):
+            worst_status = st_i
             worst_i = i
-
+            worst_score = score
             worst_reason = f"Sustained {int(round(s))} mph, gusts {int(round(g))} mph."
-            if offshore or big_water:
-                reasons = []
-                if offshore:
-                    reasons.append("offshore wind")
-                if big_water:
-                    reasons.append("big water")
-                worst_reason += " Risk higher due to " + ", ".join(reasons) + "."
 
-    day_label = pick_day_label(target_day)
-
+    # Top decision card
     st.markdown(
         f"""
 <div style="border-radius:16px; padding:16px; border:1px solid rgba(0,0,0,0.08);">
-  <div style="font-size:14px; opacity:0.8;">{day_label} at {chosen.split(' (')[0]}</div>
+  <div style="font-size:14px; opacity:0.8;">{chosen_label}</div>
   <div style="font-size:34px; font-weight:700; color:{status_color(worst_status)}; margin-top:6px;">{worst_status}</div>
   <div style="font-size:16px; margin-top:6px;">{worst_reason}</div>
   <div style="font-size:13px; opacity:0.75; margin-top:8px;">
@@ -358,7 +481,7 @@ try:
         unsafe_allow_html=True,
     )
 
-    # Daily summary
+    # Daily summary row
     daily_time = daily.get("time") or []
     daily_idx = None
     for i, t in enumerate(daily_time):
@@ -391,11 +514,6 @@ try:
 
         if sunrise and sunset:
             st.caption(f"Sunrise {sunrise.replace('T',' ')} | Sunset {sunset.replace('T',' ')} (local time)")
-    else:
-        c1.metric("Temp", "n/a")
-        c2.metric("Precip", "n/a")
-        c3.metric("Max wind", "n/a")
-        c4.metric("Max gust", "n/a")
 
     st.subheader("Wind focus (hourly)")
     rows = []
@@ -406,8 +524,7 @@ try:
         if s_mph != s_mph or g_mph != g_mph or d != d:
             continue
 
-        base = compute_status_custom(s_mph, g_mph)
-        bumped = apply_bump(base, offshore, big_water)
+        rating = compute_status(s_mph, g_mph, offshore=offshore, big_water=big_water)
 
         rows.append(
             {
@@ -415,7 +532,7 @@ try:
                 "Wind": f"{int(round(sustained_raw[i]))} {wind_unit}",
                 "Gust": f"{int(round(gusts_raw[i]))} {wind_unit}",
                 "Dir": f"{deg_to_compass(d)} ({int(round(d))} deg)",
-                "Rating": bumped,
+                "Rating": rating,
             }
         )
 
@@ -433,7 +550,7 @@ try:
     ).set_index("time")
     st.line_chart(chart_df)
 
-    ww = worst_window(times, sustained_mph, gusts_mph)
+    ww = worst_3hr_window(times, sustained_mph, gusts_mph)
     if ww:
         st.info(
             "Worst 3-hour window: "
@@ -443,11 +560,11 @@ try:
 
     st.subheader("Quick notes")
     notes = []
+    notes.append("Wind and gusts drive the rating. Gusty days can feel much worse than the average wind shows.")
     if offshore:
-        notes.append("Offshore wind can push you away from shore and make return harder.")
+        notes.append("Offshore wind option enabled: more conservative rating.")
     if big_water:
-        notes.append("Big water can build waves fast and reduce safe bailout options.")
-    notes.append("Gusts matter. A steady 10 can feel fine, but gusting 20 can turn it into work fast.")
+        notes.append("Big water option enabled: more conservative rating for large lakes or open stretches.")
     st.write(" ".join(notes))
 
 except RuntimeError as e:
