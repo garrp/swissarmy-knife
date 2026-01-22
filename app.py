@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 # Pacific Northwest scope (edit if you want to expand)
 PNW_COUNTRY_CODE = "US"
@@ -140,10 +140,6 @@ def sort_results_bias(results: List[dict]) -> List[dict]:
 
 
 def geocode_place_pnw(place: str) -> List[dict]:
-    """
-    Open-Meteo geocoding, filtered to PNW states, then sorted with a bias
-    toward North Idaho + Eastern Washington (and closer to Coeur d'Alene).
-    """
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": place, "count": 15, "language": "en", "format": "json"}
     data = http_get_json(url, params=params)
@@ -283,6 +279,24 @@ def worst_3hr_window(times: List[str], sustained_mph: List[float], gusts_mph: Li
     return best
 
 
+def update_location_cache(source: str, label: str, lat: float, lon: float) -> None:
+    st.session_state["active_location_source"] = source  # "gps" or "search"
+    st.session_state["active_location_label"] = label
+    st.session_state["active_location_lat"] = float(lat)
+    st.session_state["active_location_lon"] = float(lon)
+
+
+def get_cached_location() -> Optional[Tuple[str, str, float, float]]:
+    if "active_location_lat" not in st.session_state or "active_location_lon" not in st.session_state:
+        return None
+    return (
+        str(st.session_state.get("active_location_source", "")),
+        str(st.session_state.get("active_location_label", "")),
+        float(st.session_state["active_location_lat"]),
+        float(st.session_state["active_location_lon"]),
+    )
+
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
@@ -291,14 +305,25 @@ st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
 st.title("Kayak Wind Advisor")
 st.caption(f"Version {APP_VERSION}. PNW only (WA, OR, ID, MT). Biased to North Idaho + Eastern WA.")
 
-# Location first
+# Assume current location is wanted (default ON) and keep showing it until user changes it
 st.subheader("Location")
-use_my_location = st.checkbox("Use my current location", value=True)
 
-st.caption("If current location is blocked or outside the PNW filter, search by name below.")
-place_query = st.text_input("Search by place name (fallback)", value="")
+col1, col2 = st.columns([3, 2])
+with col1:
+    place_query = st.text_input("Search by place name (optional)", value="")
+with col2:
+    apply_search = st.button("Use this location")
 
-# Calendar only (no separate Date header)
+# Always try GPS in the background unless user has explicitly chosen a search location.
+# GPS results are shown until changed, and then stay on the chosen location.
+cached = get_cached_location()
+if cached is not None:
+    cached_source, cached_label, cached_lat, cached_lon = cached
+    st.caption(f"Current location in use: {cached_label} ({cached_source})")
+else:
+    st.caption("Current location in use: Detecting from device...")
+
+# Calendar only
 target_day = st.date_input("Choose a date", value=date.today())
 
 # Options: do NOT assume big water
@@ -312,12 +337,9 @@ with opt2:
 st.caption(f"Forecast timezone locked to {FORECAST_TIMEZONE} (PNW local display).")
 
 # --- Browser geolocation (best effort) ---
-lat = None
-lon = None
-
-if use_my_location:
-    components.html(
-        """
+# Always run geolocation JS. If a user has not chosen a search location, we will adopt GPS.
+components.html(
+    """
 <script>
 (async () => {
   try {
@@ -334,63 +356,70 @@ if use_my_location:
 })();
 </script>
 """,
-        height=0,
-    )
+    height=0,
+)
 
-    q = st.query_params
-    try:
-        if "lat" in q and "lon" in q:
-            lat = float(q["lat"])
-            lon = float(q["lon"])
-    except Exception:
-        lat = None
-        lon = None
-
-# Resolve final location choice
-chosen_r = None
-chosen_label = None
-
+# Read any GPS coords that might be present
+gps_lat = None
+gps_lon = None
+q = st.query_params
 try:
-    # 1) Try current location (if available)
-    if lat is not None and lon is not None:
-        rev = reverse_geocode_pnw(lat, lon)
-        if rev is not None:
-            chosen_r = rev
-            chosen_label = f"{rev.get('name','')}, {rev.get('admin1','')}, {rev.get('country','')}"
-        else:
-            st.warning("Current location not confirmed in WA/OR/ID/MT. Use the search box below.")
-            lat = None
-            lon = None
+    if "lat" in q and "lon" in q:
+        gps_lat = float(q["lat"])
+        gps_lon = float(q["lon"])
+except Exception:
+    gps_lat = None
+    gps_lon = None
 
-    # 2) Fallback to search by name (auto-pick best result; no selectbox)
-    if chosen_r is None:
-        if not place_query.strip():
-            st.info("Enter a place name to search (example: Coeur d'Alene, Hayden, Post Falls, Spokane Valley).")
-            st.stop()
+# If user clicked "Use this location", lock to the best biased search match
+if apply_search:
+    if not place_query.strip():
+        st.warning("Type a place name first.")
+    else:
+        try:
+            results = geocode_place_pnw(place_query.strip())
+            if not results:
+                allowed = ", ".join(sorted(list(PNW_ALLOWED_STATES)))
+                st.error(
+                    "No PNW matches found. Try a nearby town name.\n\n"
+                    f"Allowed area: {PNW_COUNTRY_CODE} only, states: {allowed}."
+                )
+            else:
+                best = results[0]
+                label = f"{best.get('name','')}, {best.get('admin1','')}, {best.get('country','')}"
+                lat = float(best["latitude"])
+                lon = float(best["longitude"])
+                dist = haversine_miles(CDA_LAT, CDA_LON, lat, lon)
+                update_location_cache("search", f"{label} (best match, {int(round(dist))} mi from CDA)", lat, lon)
+                st.rerun()
+        except RuntimeError as e:
+            st.error(str(e))
 
-        results = geocode_place_pnw(place_query.strip())
-        if not results:
-            allowed = ", ".join(sorted(list(PNW_ALLOWED_STATES)))
-            st.error(
-                "No PNW matches found. Try a nearby town name.\n\n"
-                f"Allowed area: {PNW_COUNTRY_CODE} only, states: {allowed}."
-            )
-            st.stop()
+# If no cached location yet OR cached was GPS, try to refresh GPS location
+if cached is None or (cached is not None and cached[0] == "gps"):
+    if gps_lat is not None and gps_lon is not None:
+        try:
+            rev = reverse_geocode_pnw(gps_lat, gps_lon)
+            if rev is not None:
+                label = f"{rev.get('name','')}, {rev.get('admin1','')}, {rev.get('country','')}"
+                update_location_cache("gps", label, float(rev["latitude"]), float(rev["longitude"]))
+                st.rerun()
+            else:
+                # Keep waiting, user can still search
+                pass
+        except RuntimeError:
+            pass
 
-        # Auto-pick the top ranked result (already biased + sorted)
-        chosen_r = results[0]
-        rlat = float(chosen_r.get("latitude", 0.0))
-        rlon = float(chosen_r.get("longitude", 0.0))
-        dist = haversine_miles(CDA_LAT, CDA_LON, rlat, rlon)
+# Now require a cached location to proceed
+cached = get_cached_location()
+if cached is None:
+    st.info("Waiting for device location. If it does not appear, search by place name and tap Use this location.")
+    st.stop()
 
-        chosen_label = f"{chosen_r.get('name','')}, {chosen_r.get('admin1','')}, {chosen_r.get('country','')}"
-        st.caption(f"Using best match: {chosen_label} ({int(round(dist))} mi from CDA)")
+active_source, chosen_label, lat, lon = cached
 
-    # Now we have lat/lon
-    lat = float(chosen_r["latitude"])
-    lon = float(chosen_r["longitude"])
-
-    # Fetch forecast (mph)
+# Fetch and display forecast
+try:
     forecast = fetch_forecast(lat, lon)
     hourly = forecast.get("hourly") or {}
     daily = forecast.get("daily") or {}
@@ -398,12 +427,12 @@ try:
     hourly_day = filter_to_day(hourly, target_day)
 
     times = hourly_day.get("time") or []
-    sustained_raw = safe_float_list(hourly_day.get("wind_speed_10m"))
-    gusts_raw = safe_float_list(hourly_day.get("wind_gusts_10m"))
-    dirs_raw = safe_float_list(hourly_day.get("wind_direction_10m"))
+    sustained = safe_float_list(hourly_day.get("wind_speed_10m"))
+    gusts = safe_float_list(hourly_day.get("wind_gusts_10m"))
+    dirs = safe_float_list(hourly_day.get("wind_direction_10m"))
 
     if not times:
-        st.warning("No hourly data returned for that date. Try another date or location.")
+        st.warning("No hourly data returned for that date. Try another date.")
         st.stop()
 
     # Day-level status: worst hour (conservative)
@@ -414,9 +443,9 @@ try:
     worst_reason = ""
 
     for i in range(len(times)):
-        s = sustained_raw[i]
-        g = gusts_raw[i]
-        d = dirs_raw[i]
+        s = sustained[i]
+        g = gusts[i]
+        d = dirs[i]
         if s != s or g != g or d != d:
             continue
 
@@ -445,7 +474,7 @@ try:
   <div style="font-size:34px; font-weight:700; color:{status_color(worst_status)}; margin-top:6px;">{worst_status}</div>
   <div style="font-size:16px; margin-top:6px;">{worst_reason}</div>
   <div style="font-size:13px; opacity:0.75; margin-top:8px;">
-    Worst hour: {times[worst_i].replace("T", " ")} ({deg_to_compass(dirs_raw[worst_i])}).
+    Worst hour: {times[worst_i].replace("T", " ")} ({deg_to_compass(dirs[worst_i])}).
   </div>
 </div>
 """,
@@ -489,9 +518,9 @@ try:
     st.subheader("Wind focus (hourly) - mph")
     rows = []
     for i in range(len(times)):
-        s = sustained_raw[i]
-        g = gusts_raw[i]
-        d = dirs_raw[i]
+        s = sustained[i]
+        g = gusts[i]
+        d = dirs[i]
         if s != s or g != g or d != d:
             continue
 
@@ -515,13 +544,13 @@ try:
     chart_df = pd.DataFrame(
         {
             "time": [t.replace("T", " ") for t in times],
-            "wind_speed_mph": sustained_raw[: len(times)],
-            "wind_gusts_mph": gusts_raw[: len(times)],
+            "wind_speed_mph": sustained[: len(times)],
+            "wind_gusts_mph": gusts[: len(times)],
         }
     ).set_index("time")
     st.line_chart(chart_df)
 
-    ww = worst_3hr_window(times, sustained_raw, gusts_raw)
+    ww = worst_3hr_window(times, sustained, gusts)
     if ww:
         st.info(
             "Worst 3-hour window: "
