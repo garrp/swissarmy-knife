@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 # Pacific Northwest scope (edit if you want to expand)
 PNW_COUNTRY_CODE = "US"
@@ -298,8 +298,7 @@ use_my_location = st.checkbox("Use my current location", value=True)
 st.caption("If current location is blocked or outside the PNW filter, search by name below.")
 place_query = st.text_input("Search by place name (fallback)", value="")
 
-# Date: calendar only
-st.subheader("Date")
+# Calendar only (no separate Date header)
 target_day = st.date_input("Choose a date", value=date.today())
 
 # Options: do NOT assume big water
@@ -363,7 +362,7 @@ try:
             lat = None
             lon = None
 
-    # 2) Fallback to search by name
+    # 2) Fallback to search by name (auto-pick best result; no selectbox)
     if chosen_r is None:
         if not place_query.strip():
             st.info("Enter a place name to search (example: Coeur d'Alene, Hayden, Post Falls, Spokane Valley).")
@@ -378,20 +377,14 @@ try:
             )
             st.stop()
 
-        label_options = []
-        for r in results:
-            name = r.get("name", "")
-            admin1 = r.get("admin1", "")
-            country = r.get("country", "")
-            rlat = r.get("latitude", 0.0)
-            rlon = r.get("longitude", 0.0)
-            dist = haversine_miles(CDA_LAT, CDA_LON, float(rlat), float(rlon))
-            label_options.append(f"{name}, {admin1}, {country} ({rlat:.3f}, {rlon:.3f}) - {int(round(dist))} mi from CDA")
+        # Auto-pick the top ranked result (already biased + sorted)
+        chosen_r = results[0]
+        rlat = float(chosen_r.get("latitude", 0.0))
+        rlon = float(chosen_r.get("longitude", 0.0))
+        dist = haversine_miles(CDA_LAT, CDA_LON, rlat, rlon)
 
-        chosen = st.selectbox("Select the best match", label_options, index=0)
-        idx = label_options.index(chosen)
-        chosen_r = results[idx]
-        chosen_label = chosen.split(" (")[0]
+        chosen_label = f"{chosen_r.get('name','')}, {chosen_r.get('admin1','')}, {chosen_r.get('country','')}"
+        st.caption(f"Using best match: {chosen_label} ({int(round(dist))} mi from CDA)")
 
     # Now we have lat/lon
     lat = float(chosen_r["latitude"])
@@ -436,7 +429,9 @@ try:
         if big_water:
             score += 8
 
-        if (rank_map[st_i] > rank_map[worst_status]) or (rank_map[st_i] == rank_map[worst_status] and score > worst_score):
+        if (rank_map[st_i] > rank_map[worst_status]) or (
+            rank_map[st_i] == rank_map[worst_status] and score > worst_score
+        ):
             worst_status = st_i
             worst_i = i
             worst_score = score
