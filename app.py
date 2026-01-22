@@ -13,20 +13,22 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 # Pacific Northwest scope (edit if you want to expand)
 PNW_COUNTRY_CODE = "US"
 PNW_ALLOWED_STATES = {"Washington", "Oregon", "Idaho", "Montana"}
 
 # Bias defaults: North Idaho + Eastern WA
-# We rank search results closer to Coeur d'Alene and prefer ID + Eastern WA.
 CDA_LAT = 47.6777
 CDA_LON = -116.7805
 EASTERN_WA_LON_MIN = -121.5  # rough Cascades split
 
 # Lock display timezone for PNW
 FORECAST_TIMEZONE = "America/Los_Angeles"
+
+# Always use mph
+WIND_UNIT = "mph"
 
 
 # ----------------------------
@@ -39,18 +41,6 @@ def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
         return r.json()
     except Exception as e:
         raise RuntimeError(f"Request failed: {e}")
-
-
-def mph_from(value: float, unit: str) -> float:
-    if unit == "mph":
-        return float(value)
-    if unit == "kmh":
-        return float(value) * 0.621371
-    if unit == "ms":
-        return float(value) * 2.23694
-    if unit == "kn":
-        return float(value) * 1.15078
-    return float(value)
 
 
 def deg_to_compass(deg: float) -> str:
@@ -79,7 +69,6 @@ def status_color(status: str) -> str:
 
 
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    # Great-circle distance
     r = 3958.7613  # Earth radius in miles
     p1 = math.radians(lat1)
     p2 = math.radians(lat2)
@@ -144,7 +133,6 @@ def sort_results_bias(results: List[dict]) -> List[dict]:
         except Exception:
             pop_i = 0
 
-        # For sorting, population should be descending; we store negative.
         scored.append(((rank, dist, -pop_i), r))
 
     scored.sort(key=lambda x: x[0])
@@ -172,9 +160,6 @@ def geocode_place_pnw(place: str) -> List[dict]:
 
 
 def reverse_geocode_pnw(lat: float, lon: float) -> Optional[dict]:
-    """
-    Reverse geocode to a nearest place name and confirm it is PNW.
-    """
     url = "https://geocoding-api.open-meteo.com/v1/reverse"
     params = {"latitude": lat, "longitude": lon, "language": "en", "format": "json"}
     data = http_get_json(url, params=params)
@@ -190,13 +175,13 @@ def reverse_geocode_pnw(lat: float, lon: float) -> Optional[dict]:
     return None
 
 
-def fetch_forecast(lat: float, lon: float, wind_unit: str) -> dict:
+def fetch_forecast(lat: float, lon: float) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
         "timezone": FORECAST_TIMEZONE,
-        "windspeed_unit": wind_unit,
+        "windspeed_unit": WIND_UNIT,  # always mph
         "temperature_unit": "fahrenheit",
         "precipitation_unit": "inch",
         "hourly": ",".join(
@@ -308,12 +293,7 @@ st.caption(f"Version {APP_VERSION}. PNW only (WA, OR, ID, MT). Biased to North I
 
 # Location first
 st.subheader("Location")
-
-colA, colB = st.columns([1, 1])
-with colA:
-    use_my_location = st.checkbox("Use my current location", value=True)
-with colB:
-    wind_unit = st.selectbox("Wind units", ["mph", "kn"], index=0)
+use_my_location = st.checkbox("Use my current location", value=True)
 
 st.caption("If current location is blocked or outside the PNW filter, search by name below.")
 place_query = st.text_input("Search by place name (fallback)", value="")
@@ -406,7 +386,6 @@ try:
             rlat = r.get("latitude", 0.0)
             rlon = r.get("longitude", 0.0)
             dist = haversine_miles(CDA_LAT, CDA_LON, float(rlat), float(rlon))
-            # show distance hint so users see the bias working
             label_options.append(f"{name}, {admin1}, {country} ({rlat:.3f}, {rlon:.3f}) - {int(round(dist))} mi from CDA")
 
         chosen = st.selectbox("Select the best match", label_options, index=0)
@@ -418,8 +397,8 @@ try:
     lat = float(chosen_r["latitude"])
     lon = float(chosen_r["longitude"])
 
-    # Fetch forecast
-    forecast = fetch_forecast(lat, lon, wind_unit=wind_unit)
+    # Fetch forecast (mph)
+    forecast = fetch_forecast(lat, lon)
     hourly = forecast.get("hourly") or {}
     daily = forecast.get("daily") or {}
 
@@ -429,9 +408,6 @@ try:
     sustained_raw = safe_float_list(hourly_day.get("wind_speed_10m"))
     gusts_raw = safe_float_list(hourly_day.get("wind_gusts_10m"))
     dirs_raw = safe_float_list(hourly_day.get("wind_direction_10m"))
-
-    sustained_mph = [mph_from(v, wind_unit) for v in sustained_raw]
-    gusts_mph = [mph_from(v, wind_unit) for v in gusts_raw]
 
     if not times:
         st.warning("No hourly data returned for that date. Try another date or location.")
@@ -445,8 +421,8 @@ try:
     worst_reason = ""
 
     for i in range(len(times)):
-        s = sustained_mph[i]
-        g = gusts_mph[i]
+        s = sustained_raw[i]
+        g = gusts_raw[i]
         d = dirs_raw[i]
         if s != s or g != g or d != d:
             continue
@@ -506,31 +482,31 @@ try:
 
         c1.metric("Temp", f"{int(round(tmax))}/{int(round(tmin))} F" if tmax is not None and tmin is not None else "n/a")
         c2.metric("Precip", f"{int(pop)}% ({float(psum):.2f} in)" if pop is not None and psum is not None else "n/a")
-        c3.metric("Max wind", f"{int(round(wmax))} {wind_unit}" if wmax is not None else "n/a")
+        c3.metric("Max wind", f"{int(round(wmax))} mph" if wmax is not None else "n/a")
         if gmax is not None and wdir is not None:
-            c4.metric("Max gust", f"{int(round(gmax))} {wind_unit} ({deg_to_compass(float(wdir))})")
+            c4.metric("Max gust", f"{int(round(gmax))} mph ({deg_to_compass(float(wdir))})")
         else:
             c4.metric("Max gust", "n/a")
 
         if sunrise and sunset:
             st.caption(f"Sunrise {sunrise.replace('T',' ')} | Sunset {sunset.replace('T',' ')} (local time)")
 
-    st.subheader("Wind focus (hourly)")
+    st.subheader("Wind focus (hourly) - mph")
     rows = []
     for i in range(len(times)):
-        s_mph = sustained_mph[i]
-        g_mph = gusts_mph[i]
+        s = sustained_raw[i]
+        g = gusts_raw[i]
         d = dirs_raw[i]
-        if s_mph != s_mph or g_mph != g_mph or d != d:
+        if s != s or g != g or d != d:
             continue
 
-        rating = compute_status(s_mph, g_mph, offshore=offshore, big_water=big_water)
+        rating = compute_status(s, g, offshore=offshore, big_water=big_water)
 
         rows.append(
             {
                 "Time": times[i].replace("T", " "),
-                "Wind": f"{int(round(sustained_raw[i]))} {wind_unit}",
-                "Gust": f"{int(round(gusts_raw[i]))} {wind_unit}",
+                "Wind (mph)": f"{int(round(s))}",
+                "Gust (mph)": f"{int(round(g))}",
                 "Dir": f"{deg_to_compass(d)} ({int(round(d))} deg)",
                 "Rating": rating,
             }
@@ -538,19 +514,19 @@ try:
 
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    st.subheader("Wind chart")
+    st.subheader("Wind chart (mph)")
     import pandas as pd
 
     chart_df = pd.DataFrame(
         {
             "time": [t.replace("T", " ") for t in times],
-            "wind_speed": sustained_raw[: len(times)],
-            "wind_gusts": gusts_raw[: len(times)],
+            "wind_speed_mph": sustained_raw[: len(times)],
+            "wind_gusts_mph": gusts_raw[: len(times)],
         }
     ).set_index("time")
     st.line_chart(chart_df)
 
-    ww = worst_3hr_window(times, sustained_mph, gusts_mph)
+    ww = worst_3hr_window(times, sustained_raw, gusts_raw)
     if ww:
         st.info(
             "Worst 3-hour window: "
@@ -560,6 +536,7 @@ try:
 
     st.subheader("Quick notes")
     notes = []
+    notes.append("All wind values are in miles per hour (mph).")
     notes.append("Wind and gusts drive the rating. Gusty days can feel much worse than the average wind shows.")
     if offshore:
         notes.append("Offshore wind option enabled: more conservative rating.")
