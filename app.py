@@ -1,4 +1,3 @@
-
 # app.py
 # Kayak Wind Advisor (Streamlit)
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
@@ -6,13 +5,18 @@
 from __future__ import annotations
 
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 import streamlit as st
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
+
+# Pacific Northwest scope (edit if you want to expand)
+PNW_COUNTRY_CODE = "US"
+PNW_ALLOWED_STATES = {"Washington", "Oregon", "Idaho", "Montana"}
+FORECAST_TIMEZONE = "America/Los_Angeles"
 
 
 # ----------------------------
@@ -41,7 +45,6 @@ def mph_from(value: float, unit: str) -> float:
 
 
 def deg_to_compass(deg: float) -> str:
-    # 16-wind compass
     dirs = [
         "N", "NNE", "NE", "ENE",
         "E", "ESE", "SE", "SSE",
@@ -58,77 +61,19 @@ def safe_float_list(x) -> List[float]:
     return [float(v) if v is not None else float("nan") for v in x]
 
 
-def compute_status_for_hour(
-    sustained_mph: float,
-    gust_mph: float,
-    offshore: bool,
-    big_water: bool,
-) -> Tuple[str, str, int]:
-    """
-    Returns (status, reason, score)
-    status: GO, CAUTION, DO NOT GO
-    reason: short text
-    score: wind risk score 0-100-ish
-    """
-    # Baseline thresholds
-    # GO: sustained 0-10 and gust <= 15
-    # CAUTION: sustained 11-15 or gust 16-22
-    # DO NOT GO: sustained >= 16 or gust >= 23
-    status = "GO"
-
-    if sustained_mph >= 16 or gust_mph >= 23:
-        status = "DO NOT GO"
-    elif sustained_mph >= 11 or gust_mph >= 16:
-        status = "CAUTION"
-    else:
-        status = "GO"
-
-    # Simple scoring model (wind-first)
-    # score = 4*sustained + 2*(gust - sustained)
-    # gust - sustained = gustiness
-    gustiness = max(0.0, gust_mph - sustained_mph)
-    score = int(round(4.0 * sustained_mph + 2.0 * gustiness))
-
-    # Bump rules
-    bump_reasons = []
-    bump = 0
-    if offshore:
-        bump += 1
-        bump_reasons.append("offshore wind")
-        score += 10
-    if big_water:
-        bump += 1
-        bump_reasons.append("big water")
-        score += 8
-
-    # Apply bump at most one level worse, but if already DO NOT GO, keep it
-    if status != "DO NOT GO" and bump > 0:
-        if status == "GO":
-            status = "CAUTION"
-        elif status == "CAUTION":
-            status = "DO NOT GO"
-
-    reason = f"Sustained {int(round(sustained_mph))} mph, gusts {int(round(gust_mph))} mph."
-    if bump_reasons:
-        reason += " Risk higher due to " + ", ".join(bump_reasons) + "."
-
-    return status, reason, score
-
-
-def worst_window(times: List[str], sustained: List[float], gusts: List[float], tz_label: str) -> Optional[dict]:
-    # Find worst 3-hour window by average risk score
-    if not times or not sustained or not gusts:
+def worst_window(times: List[str], sustained_mph: List[float], gusts_mph: List[float]) -> Optional[dict]:
+    # Find worst 3-hour window by average wind score
+    if not times or not sustained_mph or not gusts_mph:
         return None
 
-    n = min(len(times), len(sustained), len(gusts))
+    n = min(len(times), len(sustained_mph), len(gusts_mph))
     if n < 3:
         return None
 
-    # Compute per-hour raw score (no bump here, just wind intensity)
     scores = []
     for i in range(n):
-        s = sustained[i]
-        g = gusts[i]
+        s = sustained_mph[i]
+        g = gusts_mph[i]
         if s != s or g != g:
             scores.append(None)
         else:
@@ -146,33 +91,38 @@ def worst_window(times: List[str], sustained: List[float], gusts: List[float], t
                 "start": times[i],
                 "end": times[i + 2],
                 "avg_score": avg,
-                "sustained_avg": sum(sustained[i : i + 3]) / 3.0,
-                "gust_avg": sum(gusts[i : i + 3]) / 3.0,
-                "tz": tz_label,
+                "sustained_avg": sum(sustained_mph[i : i + 3]) / 3.0,
+                "gust_avg": sum(gusts_mph[i : i + 3]) / 3.0,
             }
     return best
 
 
-def geocode_place(place: str) -> Optional[dict]:
+def geocode_place_pnw(place: str) -> List[dict]:
     """
-    Open-Meteo geocoding:
-    https://geocoding-api.open-meteo.com/v1/search?name=spokane&count=5&language=en&format=json
+    Uses Open-Meteo geocoding and filters to PNW states only.
     """
     url = "https://geocoding-api.open-meteo.com/v1/search"
-    params = {"name": place, "count": 8, "language": "en", "format": "json"}
+    params = {"name": place, "count": 12, "language": "en", "format": "json"}
     data = http_get_json(url, params=params)
     results = data.get("results") or []
-    if not results:
-        return None
-    return {"results": results}
+
+    filtered = []
+    for r in results:
+        country_code = (r.get("country_code") or "").strip()
+        admin1 = (r.get("admin1") or "").strip()
+        # Keep only US PNW state results
+        if country_code == PNW_COUNTRY_CODE and admin1 in PNW_ALLOWED_STATES:
+            filtered.append(r)
+
+    return filtered
 
 
-def fetch_forecast(lat: float, lon: float, timezone: str, wind_unit: str) -> dict:
+def fetch_forecast(lat: float, lon: float, wind_unit: str) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "timezone": timezone,
+        "timezone": FORECAST_TIMEZONE,
         "windspeed_unit": wind_unit,  # mph, kn, kmh, ms
         "temperature_unit": "fahrenheit",
         "precipitation_unit": "inch",
@@ -181,7 +131,6 @@ def fetch_forecast(lat: float, lon: float, timezone: str, wind_unit: str) -> dic
                 "temperature_2m",
                 "precipitation_probability",
                 "precipitation",
-                "weathercode",
                 "wind_speed_10m",
                 "wind_gusts_10m",
                 "wind_direction_10m",
@@ -206,12 +155,10 @@ def fetch_forecast(lat: float, lon: float, timezone: str, wind_unit: str) -> dic
 
 
 def filter_to_day(hourly: dict, target: date) -> dict:
-    # hourly["time"] is local time in the requested timezone
     times = hourly.get("time") or []
     out = {}
     idx = []
     for i, t in enumerate(times):
-        # t format: "YYYY-MM-DDTHH:MM"
         try:
             d = datetime.fromisoformat(t).date()
         except Exception:
@@ -251,12 +198,13 @@ def status_color(status: str) -> str:
 st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
 
 st.title("Kayak Wind Advisor")
-st.caption(f"Version {APP_VERSION}. Wind-first GO / CAUTION / DO NOT GO guidance for kayak days.")
+st.caption(
+    f"Version {APP_VERSION}. Pacific Northwest only (WA, OR, ID, MT). Wind-first GO / CAUTION / DO NOT GO."
+)
 
 with st.sidebar:
-    st.subheader("Location")
+    st.subheader("Location (PNW only)")
     place = st.text_input("Place name (city, lake, launch)", value="Coeur d'Alene")
-    st.caption("Tip: Try city names near your launch (example: Hayden, Spirit Lake, Kettle Falls).")
 
     st.subheader("Day")
     day_choice = st.radio("Pick a day", ["Today", "Tomorrow", "Pick a date"], index=0)
@@ -269,22 +217,18 @@ with st.sidebar:
 
     st.subheader("Wind settings")
     wind_unit = st.selectbox("Wind units", ["mph", "kn"], index=0)
+
     offshore = st.checkbox("Assume offshore wind risk", value=False)
     big_water = st.checkbox("Big water (large lake, long fetch)", value=True)
 
-    st.subheader("Timezone")
-    timezone = st.selectbox(
-        "Forecast timezone (local display)",
-        ["America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York"],
-        index=0,
-    )
-
     st.subheader("Decision style")
-    st.caption("These thresholds are conservative for most recreational kayaking.")
+    st.caption("Conservative defaults for most recreational kayak anglers.")
     go_max = st.slider("GO sustained max", min_value=5, max_value=15, value=10, step=1)
     caution_max = st.slider("CAUTION sustained max", min_value=10, max_value=25, value=15, step=1)
     go_gust_max = st.slider("GO gust max", min_value=10, max_value=25, value=15, step=1)
     caution_gust_max = st.slider("CAUTION gust max", min_value=15, max_value=35, value=22, step=1)
+
+st.caption(f"Forecast timezone locked to {FORECAST_TIMEZONE} (PNW local display).")
 
 
 def compute_status_custom(sustained_mph: float, gust_mph: float) -> str:
@@ -295,10 +239,10 @@ def compute_status_custom(sustained_mph: float, gust_mph: float) -> str:
     return "GO"
 
 
-def apply_bump(status: str) -> str:
+def apply_bump(status: str, offshore_flag: bool, big_water_flag: bool) -> str:
     if status == "DO NOT GO":
         return status
-    if offshore or big_water:
+    if offshore_flag or big_water_flag:
         if status == "GO":
             return "CAUTION"
         if status == "CAUTION":
@@ -310,32 +254,36 @@ def apply_bump(status: str) -> str:
 # Run
 # ----------------------------
 if not place.strip():
-    st.info("Enter a place name to get a wind-first kayak rating.")
+    st.info("Enter a PNW place name to get a wind-first kayak rating.")
     st.stop()
 
 try:
-    geo = geocode_place(place.strip())
-    if geo is None:
-        st.error("No matches found. Try a nearby town or a simpler name.")
+    results = geocode_place_pnw(place.strip())
+    if not results:
+        allowed = ", ".join(sorted(list(PNW_ALLOWED_STATES)))
+        st.error(
+            "No PNW matches found. Try a nearby town name.\n\n"
+            f"Allowed area: {PNW_COUNTRY_CODE} only, states: {allowed}."
+        )
         st.stop()
 
-    results = geo["results"]
     label_options = []
     for r in results:
         name = r.get("name", "")
         admin1 = r.get("admin1", "")
         country = r.get("country", "")
-        lat = r.get("latitude", "")
-        lon = r.get("longitude", "")
+        lat = r.get("latitude", 0.0)
+        lon = r.get("longitude", 0.0)
         label_options.append(f"{name}, {admin1}, {country} ({lat:.3f}, {lon:.3f})")
 
     chosen = st.selectbox("Select the best match", label_options, index=0)
     chosen_idx = label_options.index(chosen)
     chosen_r = results[chosen_idx]
+
     lat = float(chosen_r["latitude"])
     lon = float(chosen_r["longitude"])
 
-    forecast = fetch_forecast(lat, lon, timezone=timezone, wind_unit=wind_unit)
+    forecast = fetch_forecast(lat, lon, wind_unit=wind_unit)
     hourly = forecast.get("hourly") or {}
     daily = forecast.get("daily") or {}
 
@@ -346,7 +294,6 @@ try:
     gusts_raw = safe_float_list(hourly_day.get("wind_gusts_10m"))
     dirs_raw = safe_float_list(hourly_day.get("wind_direction_10m"))
 
-    # Convert to mph for decision, regardless of displayed unit
     sustained_mph = [mph_from(v, wind_unit) for v in sustained_raw]
     gusts_mph = [mph_from(v, wind_unit) for v in gusts_raw]
 
@@ -354,22 +301,24 @@ try:
         st.warning("No hourly data returned for that day. Try another day or location.")
         st.stop()
 
-    # Determine a day-level status using the worst hour (most conservative)
+    # Day-level status: worst hour (conservative)
     worst_status = "GO"
     worst_reason = ""
     worst_score = -1
     worst_i = 0
 
+    rank_map = {"GO": 0, "CAUTION": 1, "DO NOT GO": 2}
+
     for i in range(len(times)):
         s = sustained_mph[i]
         g = gusts_mph[i]
-        if s != s or g != g:
+        d = dirs_raw[i]
+        if s != s or g != g or d != d:
             continue
 
         base = compute_status_custom(s, g)
-        bumped = apply_bump(base)
+        bumped = apply_bump(base, offshore, big_water)
 
-        # score to pick "worst hour"
         gustiness = max(0.0, g - s)
         score = int(round(4.0 * s + 2.0 * gustiness))
         if offshore:
@@ -377,14 +326,13 @@ try:
         if big_water:
             score += 8
 
-        # rank: DO NOT GO > CAUTION > GO, then by score
-        rank = {"GO": 0, "CAUTION": 1, "DO NOT GO": 2}[bumped]
-        best_rank = {"GO": 0, "CAUTION": 1, "DO NOT GO": 2}[worst_status]
-
-        if (rank > best_rank) or (rank == best_rank and score > worst_score):
+        if (rank_map[bumped] > rank_map[worst_status]) or (
+            rank_map[bumped] == rank_map[worst_status] and score > worst_score
+        ):
             worst_status = bumped
             worst_score = score
             worst_i = i
+
             worst_reason = f"Sustained {int(round(s))} mph, gusts {int(round(g))} mph."
             if offshore or big_water:
                 reasons = []
@@ -394,17 +342,7 @@ try:
                     reasons.append("big water")
                 worst_reason += " Risk higher due to " + ", ".join(reasons) + "."
 
-    # Daily summary (find matching daily index)
     day_label = pick_day_label(target_day)
-    daily_time = daily.get("time") or []
-    daily_idx = None
-    for i, t in enumerate(daily_time):
-        try:
-            if date.fromisoformat(t) == target_day:
-                daily_idx = i
-                break
-        except Exception:
-            continue
 
     st.markdown(
         f"""
@@ -420,7 +358,17 @@ try:
         unsafe_allow_html=True,
     )
 
-    # Secondary day summary row
+    # Daily summary
+    daily_time = daily.get("time") or []
+    daily_idx = None
+    for i, t in enumerate(daily_time):
+        try:
+            if date.fromisoformat(t) == target_day:
+                daily_idx = i
+                break
+        except Exception:
+            continue
+
     c1, c2, c3, c4 = st.columns(4)
     if daily_idx is not None:
         tmax = (daily.get("temperature_2m_max") or [None])[daily_idx]
@@ -434,7 +382,7 @@ try:
         sunset = (daily.get("sunset") or [None])[daily_idx]
 
         c1.metric("Temp", f"{int(round(tmax))}/{int(round(tmin))} F" if tmax is not None and tmin is not None else "n/a")
-        c2.metric("Precip", f"{int(pop)}% ({psum:.2f} in)" if pop is not None and psum is not None else "n/a")
+        c2.metric("Precip", f"{int(pop)}% ({float(psum):.2f} in)" if pop is not None and psum is not None else "n/a")
         c3.metric("Max wind", f"{int(round(wmax))} {wind_unit}" if wmax is not None else "n/a")
         if gmax is not None and wdir is not None:
             c4.metric("Max gust", f"{int(round(gmax))} {wind_unit} ({deg_to_compass(float(wdir))})")
@@ -442,7 +390,7 @@ try:
             c4.metric("Max gust", "n/a")
 
         if sunrise and sunset:
-            st.caption(f"Sunrise {sunrise.replace('T',' ')} | Sunset {sunset.replace('T',' ')} ({timezone})")
+            st.caption(f"Sunrise {sunrise.replace('T',' ')} | Sunset {sunset.replace('T',' ')} (local time)")
     else:
         c1.metric("Temp", "n/a")
         c2.metric("Precip", "n/a")
@@ -450,7 +398,6 @@ try:
         c4.metric("Max gust", "n/a")
 
     st.subheader("Wind focus (hourly)")
-    # Build display table
     rows = []
     for i in range(len(times)):
         s_mph = sustained_mph[i]
@@ -460,7 +407,7 @@ try:
             continue
 
         base = compute_status_custom(s_mph, g_mph)
-        bumped = apply_bump(base)
+        bumped = apply_bump(base, offshore, big_water)
 
         rows.append(
             {
@@ -475,8 +422,6 @@ try:
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
     st.subheader("Wind chart")
-    # Streamlit line_chart expects numeric columns, so chart sustained and gusts in the chosen unit
-    # We chart raw unit values (already in selected wind_unit from API)
     import pandas as pd
 
     chart_df = pd.DataFrame(
@@ -486,23 +431,22 @@ try:
             "wind_gusts": gusts_raw[: len(times)],
         }
     ).set_index("time")
-
     st.line_chart(chart_df)
 
-    ww = worst_window(times, sustained_mph, gusts_mph, timezone)
+    ww = worst_window(times, sustained_mph, gusts_mph)
     if ww:
         st.info(
             "Worst 3-hour window: "
-            f"{ww['start'].replace('T',' ')} to {ww['end'].replace('T',' ')} "
-            f"avg sustained {int(round(ww['sustained_avg']))} mph, avg gust {int(round(ww['gust_avg']))} mph."
+            f"{ww['start'].replace('T',' ')} to {ww['end'].replace('T',' ')}. "
+            f"Avg sustained {int(round(ww['sustained_avg']))} mph, avg gust {int(round(ww['gust_avg']))} mph."
         )
 
     st.subheader("Quick notes")
     notes = []
     if offshore:
-        notes.append("Offshore wind can push you away from the launch and make return harder.")
+        notes.append("Offshore wind can push you away from shore and make return harder.")
     if big_water:
-        notes.append("Big water usually means more wave build and fewer safe bailout options.")
+        notes.append("Big water can build waves fast and reduce safe bailout options.")
     notes.append("Gusts matter. A steady 10 can feel fine, but gusting 20 can turn it into work fast.")
     st.write(" ".join(notes))
 
