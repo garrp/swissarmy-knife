@@ -1,6 +1,6 @@
 # app.py
 # Kayak Compass
-# Version 1.0.4
+# Version 1.0.5
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 OTHER_APP_URL = "https://fishing-tools.streamlit.app/"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
@@ -25,7 +25,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.4"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.5"})
     r.raise_for_status()
     return r.json()
 
@@ -162,7 +162,7 @@ st.markdown(
   text-transform: uppercase;
 }
 
-/* Simple sidebar polish */
+/* Sidebar polish (nav only) */
 section[data-testid="stSidebar"] {
   border-right: 1px solid rgba(255,255,255,0.08);
 }
@@ -176,14 +176,21 @@ section[data-testid="stSidebar"] {
 st.caption(f"Version {APP_VERSION}. Instant wind-based kayak rating. Wind in mph.")
 
 # ----------------------------
-# Sidebar controls + link
+# Sidebar (NAV ONLY)
 # ----------------------------
 with st.sidebar:
-    st.subheader("Options")
+    st.subheader("Navigation")
+    st.link_button("Fishing Tools", OTHER_APP_URL)
+    st.caption("Opens in a new tab.")
+
+# ----------------------------
+# Main controls (NOT in sidebar)
+# ----------------------------
+col_a, col_b = st.columns([2, 1])
+with col_a:
     target_day = st.date_input("Choose a date", value=date.today())
+with col_b:
     big_water = st.checkbox("Big water", value=False)
-    st.link_button("Open Fishing Tools", OTHER_APP_URL)
-    st.caption("Fishing Tools opens in a new tab.")
 
 # ----------------------------
 # Location JS (always runs)
@@ -254,7 +261,7 @@ if not times:
     st.warning("No hourly data returned for that date. Try another date.")
     st.stop()
 
-# Worst hour based on wind+gusts
+# Worst hour based on wind+gust
 worst_i = max(range(len(times)), key=lambda i: float(wind[i]) + float(gust[i]))
 status = compute_kayak_rating(float(wind[worst_i]), float(gust[worst_i]), big_water)
 
@@ -284,7 +291,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Daily forced 2x2 table (st.metric stacks on mobile)
+# Daily forced 2x2 table
 daily_time = daily.get("time") or []
 if target_day.isoformat() in daily_time:
     d_idx = daily_time.index(target_day.isoformat())
