@@ -1,20 +1,21 @@
 # app.py
 # Kayak Go/No-Go
-# Version 1.0.9
+# Version 1.1.0
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
 
 from __future__ import annotations
 
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 OTHER_APP_URL = "https://fishing-tools.streamlit.app/"
+FISHYNW_URL = "https://fishynw.com"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
 WIND_UNIT = "mph"
@@ -25,7 +26,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakGoNoGo/1.0.9"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakGoNoGo/1.1.0"})
     r.raise_for_status()
     return r.json()
 
@@ -181,6 +182,44 @@ def exposure_advice(exposure_risk: str) -> List[str]:
     ]
 
 
+def kayak_safe_tips(status: str, big_water: bool) -> List[str]:
+    tips: List[str] = []
+
+    # Always-on basics
+    tips += [
+        "Wear your PFD the whole time.",
+        "Tell someone your launch spot and return time.",
+        "Check the shoreline first. If you see whitecaps or trees bending, reconsider.",
+        "Stay close to shore and avoid long open crossings when winds are building.",
+        "Keep your phone in a waterproof case, and carry a whistle.",
+    ]
+
+    if big_water:
+        tips += [
+            "Big water rule: do not trust morning calm. Wind can turn fast and stack waves.",
+            "Avoid the middle. Fish the edges and plan a protected route back.",
+        ]
+
+    # Status-based tips
+    if status == "GO":
+        tips += [
+            "Still plan for a wind shift. Pick a route that keeps you sheltered if it changes.",
+        ]
+    elif status == "CAUTION":
+        tips += [
+            "Shorten the trip and stay near an easy exit point.",
+            "Face wind on the way out so you have help coming back.",
+            "Consider anchoring only in sheltered water. Avoid anchoring in moving current or strong wind.",
+        ]
+    else:  # NO GO
+        tips += [
+            "Do not launch. If you must be on the water, choose a smaller protected lake or delay.",
+            "A calm shoreline does not mean safe conditions farther out.",
+        ]
+
+    return tips
+
+
 # ----------------------------
 # UI
 # ----------------------------
@@ -240,11 +279,12 @@ section[data-testid="stSidebar"] {
 
 st.caption(f"Kayak Go/No-Go | Version {APP_VERSION}. Wind and exposure based rating. Wind in mph.")
 
-# Sidebar (NAV ONLY)
+# Sidebar (NAV + LINKS)
 with st.sidebar:
-    st.subheader("Navigation")
+    st.subheader("Links")
     st.link_button("Fishing Tools", OTHER_APP_URL)
-    st.caption("Opens in a new tab.")
+    st.link_button("FishyNW.com", FISHYNW_URL)
+    st.caption("Links open in a new tab.")
 
 # Main controls
 col_a, col_b = st.columns([2, 1])
@@ -339,7 +379,7 @@ if target_day.isoformat() in daily_time:
     max_g = int(round(daily["wind_gusts_10m_max"][d_idx]))
     t_hi = int(round(daily["temperature_2m_max"][d_idx]))
     t_lo = int(round(daily["temperature_2m_min"][d_idx]))
-    rain = int(daily["precipitation_probability_max"][d_idx])
+    rain = int(round(daily["precipitation_probability_max"][d_idx]))
 
 exposure_risk = "LOW"
 if t_hi is not None and t_lo is not None and max_w is not None:
@@ -360,10 +400,7 @@ st.markdown(
 )
 
 # Compact details
-worst_dir = ""
-if len(wdir) > worst_i:
-    worst_dir = deg_to_compass(float(wdir[worst_i]))
-
+worst_dir = deg_to_compass(float(wdir[worst_i])) if len(wdir) > worst_i else ""
 st.markdown(
     f"""
 <div style="margin-top:6px; margin-bottom:6px; font-size:14px; opacity:0.85;">
@@ -429,3 +466,9 @@ if (max_w is not None) and (max_g is not None) and (t_hi is not None) and (t_lo 
     st.markdown(f"### Exposure - {exposure_risk}")
     for line in exposure_advice(exposure_risk):
         st.write(line)
+
+# ---- KAYAK SAFE TIPS ----
+st.markdown("### Kayak safe tips")
+tips = kayak_safe_tips(status, big_water)
+for t in tips:
+    st.write("- " + t)
