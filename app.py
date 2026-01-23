@@ -1,6 +1,6 @@
 # app.py
 # Kayak Compass
-# Version 1.0.6
+# Version 1.0.7
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 OTHER_APP_URL = "https://fishing-tools.streamlit.app/"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
@@ -25,7 +25,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.6"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.7"})
     r.raise_for_status()
     return r.json()
 
@@ -95,7 +95,7 @@ def filter_to_day(hourly: dict, target: date) -> dict:
     return out
 
 
-def compute_kayak_rating(s: float, g: float, big_water: bool) -> str:
+def compute_wind_rating(s: float, g: float, big_water: bool) -> str:
     # Small water typical
     if not big_water:
         if s >= 16 or g >= 23:
@@ -112,76 +112,79 @@ def compute_kayak_rating(s: float, g: float, big_water: bool) -> str:
     return "GO"
 
 
-def circle_fill(status: str) -> str:
-    return {"GO": "#2ecc71", "CAUTION": "#f1c40f", "NO GO": "#e74c3c"}[status]
-
-
-def exposure_advice(temp_hi_f: int, temp_lo_f: int, max_wind_mph: int, big_water: bool) -> Tuple[str, List[str]]:
+def exposure_risk_level(temp_hi_f: int, temp_lo_f: int, max_wind_mph: int, big_water: bool) -> str:
     """
-    Simple air-temp exposure guidance (PNW focused).
-    Not a medical tool. Meant to nudge gear choices for cold, wind, and wet conditions.
+    Exposure risk based on air temps plus wind and big water flag.
+    Returns: LOW, MODERATE, HIGH
     """
-    # Basic risk buckets based on air temps. Wind bumps risk slightly.
     risk = "LOW"
-    if temp_lo_f <= 32 or temp_hi_f <= 40:
+
+    # Base on air temps
+    if temp_lo_f <= 28 or temp_hi_f <= 36:
         risk = "HIGH"
-    elif temp_lo_f <= 40 or temp_hi_f <= 50:
+    elif temp_lo_f <= 38 or temp_hi_f <= 48:
         risk = "MODERATE"
 
+    # Wind bump
     if max_wind_mph >= 15 and risk == "LOW":
         risk = "MODERATE"
     elif max_wind_mph >= 15 and risk == "MODERATE":
         risk = "HIGH"
 
-    # Big water: treat the same air temps as one step riskier
+    # Big water bump
     if big_water and risk == "LOW":
         risk = "MODERATE"
     elif big_water and risk == "MODERATE":
         risk = "HIGH"
 
-    lines: List[str] = []
+    return risk
 
-    if risk == "LOW":
-        lines.append("Comfort looks decent, but stay dry and keep a wind layer handy.")
-        lines.append("If you get soaked, temps can feel a lot colder on the paddle back.")
-    elif risk == "MODERATE":
-        lines.append("Cool/cold exposure risk. Dress for wind and the chance of getting wet.")
-        lines.append("Plan for a slower return if you get tired or the wind picks up.")
-    else:
-        lines.append("High cold exposure risk. Even a small mistake can get serious fast.")
-        lines.append("If you would be miserable standing wet on shore, upgrade your gear.")
 
-    # Gear suggestions (short, practical)
-    gear: List[str] = []
-    if risk == "LOW":
-        gear += [
-            "Wind shell or light rain jacket",
-            "Dry bag with spare layer",
-        ]
-    elif risk == "MODERATE":
-        gear += [
-            "Waterproof/windproof outer layer",
-            "Insulating mid-layer (fleece or puffy)",
-            "Warm hat and gloves",
-            "Dry bag with spare clothes",
-        ]
-    else:
-        gear += [
-            "Drysuit (best) or wetsuit if appropriate",
-            "Insulating layers (avoid cotton)",
-            "Warm hat, gloves, and thick socks",
-            "Dry bag: full spare set plus towel",
-            "Hand warmers if you use them",
+def combine_ratings(wind_status: str, exposure_risk: str) -> str:
+    """
+    Final status logic:
+    - If wind says NO GO, final is NO GO.
+    - If exposure is HIGH, final is at least CAUTION.
+    - If exposure is HIGH and wind is already CAUTION, keep CAUTION.
+    - If exposure is HIGH and wind is GO, upgrade to CAUTION.
+    - If exposure is HIGH and wind is NO GO, remains NO GO.
+    (No forced NO GO from exposure alone, per your direction, but we can make it CAUTION.)
+    """
+    if wind_status == "NO GO":
+        return "NO GO"
+    if exposure_risk == "HIGH":
+        return "CAUTION"
+    return wind_status
+
+
+def circle_fill(status: str) -> str:
+    return {"GO": "#2ecc71", "CAUTION": "#f1c40f", "NO GO": "#e74c3c"}[status]
+
+
+def exposure_advice(exposure_risk: str) -> List[str]:
+    """
+    Short, practical gear notes for the bottom of the weather section.
+    """
+    if exposure_risk == "LOW":
+        return [
+            "Exposure looks manageable, but stay dry and keep a wind layer handy.",
+            "Bring a dry bag with a spare layer just in case.",
+            "PFD worn, whistle, phone in a waterproof case.",
         ]
 
-    # Always-good safety reminders
-    gear += [
-        "PFD worn (not stored)",
-        "Whistle and a light (headlamp or small nav light)",
-        "Phone in a waterproof case",
+    if exposure_risk == "MODERATE":
+        return [
+            "Cool/cold exposure risk. Dress for wind and the chance of getting wet.",
+            "Recommended: waterproof/windproof outer layer, insulating mid-layer, warm hat and gloves.",
+            "Dry bag: spare clothes. PFD worn, whistle, phone in a waterproof case.",
+        ]
+
+    # HIGH
+    return [
+        "High cold exposure risk. If you get wet, the margin for error shrinks fast.",
+        "Strongly consider: drysuit (best) or appropriate wetsuit, insulating layers (avoid cotton), warm hat and gloves.",
+        "Dry bag: full spare set plus towel. PFD worn, whistle, phone in a waterproof case.",
     ]
-
-    return risk, lines + ["Suggested gear: " + ", ".join(gear) + "."]
 
 
 # ----------------------------
@@ -241,28 +244,22 @@ section[data-testid="stSidebar"] {
     unsafe_allow_html=True,
 )
 
-st.caption(f"Version {APP_VERSION}. Instant wind-based kayak rating. Wind in mph.")
+st.caption(f"Version {APP_VERSION}. Wind-based rating plus cold exposure awareness. Wind in mph.")
 
-# ----------------------------
 # Sidebar (NAV ONLY)
-# ----------------------------
 with st.sidebar:
     st.subheader("Navigation")
     st.link_button("Fishing Tools", OTHER_APP_URL)
     st.caption("Opens in a new tab.")
 
-# ----------------------------
-# Main controls (NOT in sidebar)
-# ----------------------------
+# Main controls
 col_a, col_b = st.columns([2, 1])
 with col_a:
     target_day = st.date_input("Choose a date", value=date.today())
 with col_b:
     big_water = st.checkbox("Big water", value=False)
 
-# ----------------------------
 # Location JS (always runs)
-# ----------------------------
 components.html(
     """
 <script>
@@ -331,7 +328,29 @@ if not times:
 
 # Worst hour based on wind+gust
 worst_i = max(range(len(times)), key=lambda i: float(wind[i]) + float(gust[i]))
-status = compute_kayak_rating(float(wind[worst_i]), float(gust[worst_i]), big_water)
+wind_status = compute_wind_rating(float(wind[worst_i]), float(gust[worst_i]), big_water)
+
+# Daily values needed for exposure
+daily_time = daily.get("time") or []
+t_hi = None
+t_lo = None
+max_w = None
+max_g = None
+rain = None
+if target_day.isoformat() in daily_time:
+    d_idx = daily_time.index(target_day.isoformat())
+    max_w = int(round(daily["wind_speed_10m_max"][d_idx]))
+    max_g = int(round(daily["wind_gusts_10m_max"][d_idx]))
+    t_hi = int(round(daily["temperature_2m_max"][d_idx]))
+    t_lo = int(round(daily["temperature_2m_min"][d_idx]))
+    rain = int(daily["precipitation_probability_max"][d_idx])
+
+# Exposure risk affects bubble (at least CAUTION if HIGH)
+exposure_risk = "LOW"
+if t_hi is not None and t_lo is not None and max_w is not None:
+    exposure_risk = exposure_risk_level(t_hi, t_lo, max_w, big_water)
+
+status = combine_ratings(wind_status, exposure_risk)
 
 # Big circle
 st.markdown(
@@ -359,17 +378,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Daily forced 2x2 table + exposure section
-daily_time = daily.get("time") or []
-if target_day.isoformat() in daily_time:
-    d_idx = daily_time.index(target_day.isoformat())
+# Explain why bubble changed (only when exposure forces CAUTION)
+if wind_status == "GO" and status == "CAUTION" and exposure_risk == "HIGH":
+    st.info("Caution due to cold exposure risk. Wind looks OK, but getting wet in these temps can be dangerous.")
 
-    max_w = int(round(daily["wind_speed_10m_max"][d_idx]))
-    max_g = int(round(daily["wind_gusts_10m_max"][d_idx]))
-    t_hi = int(round(daily["temperature_2m_max"][d_idx]))
-    t_lo = int(round(daily["temperature_2m_min"][d_idx]))
-    rain = int(daily["precipitation_probability_max"][d_idx])
-
+# Daily forced 2x2 table
+if (max_w is not None) and (max_g is not None) and (t_hi is not None) and (t_lo is not None) and (rain is not None):
     st.markdown(
         f"""
 <table style="width:100%; text-align:center; margin-top:10px; border-collapse:separate; border-spacing:10px;">
@@ -398,10 +412,9 @@ if target_day.isoformat() in daily_time:
         unsafe_allow_html=True,
     )
 
-    # Exposure guidance at bottom of the weather
-    risk, advice_lines = exposure_advice(t_hi, t_lo, max_w, big_water)
-    st.markdown(f"### Exposure (air temp) - {risk}")
-    for line in advice_lines:
+    # Exposure section at bottom of weather
+    st.markdown(f"### Exposure - {exposure_risk}")
+    for line in exposure_advice(exposure_risk):
         st.write(line)
 
 # Next hours
@@ -413,7 +426,7 @@ for i in range(min(10, len(times))):
             "Time": times[i].replace("T", " "),
             "Wind": int(round(wind[i])),
             "Gust": int(round(gust[i])),
-            "Rating": compute_kayak_rating(float(wind[i]), float(gust[i]), big_water),
+            "Rating": compute_wind_rating(float(wind[i]), float(gust[i]), big_water),
         }
     )
 st.dataframe(rows, use_container_width=True, hide_index=True)
