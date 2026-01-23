@@ -12,7 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
 WIND_UNIT = "mph"
@@ -26,7 +26,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.3.0"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.4.0"})
     r.raise_for_status()
     return r.json()
 
@@ -119,10 +119,31 @@ def filter_to_day(hourly: dict, target: date) -> dict:
     return out
 
 
-def compute_kayak_rating(sustained_mph: float, gust_mph: float) -> str:
-    if sustained_mph >= 16 or gust_mph >= 23:
+def compute_kayak_rating(sustained_mph: float, gust_mph: float, big_water: bool) -> str:
+    # Base (small water typical):
+    # GO: sustained 0-10 and gust <= 15
+    # CAUTION: sustained 11-15 or gust 16-22
+    # NO GO: sustained >= 16 or gust >= 23
+    go_s = 10
+    go_g = 15
+    caution_s = 15
+    caution_g = 22
+    nogo_s = 16
+    nogo_g = 23
+
+    # Big water: shift more conservative (lower thresholds)
+    # This is intentionally simple and predictable.
+    if big_water:
+        go_s = 8
+        go_g = 12
+        caution_s = 12
+        caution_g = 18
+        nogo_s = 13
+        nogo_g = 19
+
+    if sustained_mph >= nogo_s or gust_mph >= nogo_g:
         return "NO GO"
-    if sustained_mph >= 11 or gust_mph >= 16:
+    if sustained_mph > go_s or gust_mph > go_g:
         return "CAUTION"
     return "GO"
 
@@ -140,28 +161,33 @@ def circle_fill(status: str) -> str:
 # ----------------------------
 st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
 
-# Smaller one-line header for mobile
+# Move header down so it is not clipped by the mobile browser top UI
 st.markdown(
     """
 <style>
-/* Make header one line on mobile */
+/* Add safe top padding so the title is always visible on mobile */
+.block-container {
+  padding-top: 44px !important;
+  padding-bottom: 16px !important;
+}
+
+/* One-line header */
 .kwa-title {
-  font-size: 32px;
-  font-weight: 800;
+  font-size: 30px;
+  font-weight: 900;
   line-height: 1.05;
   margin: 0 0 6px 0;
   white-space: nowrap;
 }
 
-/* Big circle status */
+/* Big circle */
 .kwa-circle-wrap {
   width: 100%;
   display: flex;
   justify-content: center;
-  margin-top: 8px;
+  margin-top: 10px;
   margin-bottom: 10px;
 }
-
 .kwa-circle {
   width: min(78vw, 360px);
   height: min(78vw, 360px);
@@ -171,7 +197,6 @@ st.markdown(
   justify-content: center;
   box-shadow: 0 10px 30px rgba(0,0,0,0.22);
 }
-
 .kwa-circle-text {
   font-size: clamp(46px, 10vw, 92px);
   font-weight: 900;
@@ -179,10 +204,8 @@ st.markdown(
   color: """ + PAGE_BG_DARK + """;
   text-transform: uppercase;
 }
-
-/* Tighten up spacing for mobile */
-.block-container { padding-top: 18px; }
 </style>
+
 <h1 class="kwa-title">Kayak Wind Advisor</h1>
 """,
     unsafe_allow_html=True,
@@ -190,7 +213,12 @@ st.markdown(
 
 st.caption(f"Version {APP_VERSION}. Uses your location automatically. Wind in mph.")
 
-target_day = st.date_input("Choose a date", value=date.today())
+# Controls (minimal)
+col_a, col_b = st.columns([2, 1])
+with col_a:
+    target_day = st.date_input("Choose a date", value=date.today())
+with col_b:
+    big_water = st.checkbox("Big water", value=False)
 
 # Always run geolocation JS
 components.html(
@@ -272,14 +300,17 @@ worst_score = -1
 for i in range(len(times)):
     s = wind[i]
     g = gust[i]
-    r_i = compute_kayak_rating(s, g)
+    r_i = compute_kayak_rating(s, g, big_water=big_water)
     score = int(round(4.0 * s + 2.0 * max(0.0, g - s)))
+    if big_water:
+        score += 12
+
     if (rank[r_i] > rank[worst_status]) or (rank[r_i] == rank[worst_status] and score > worst_score):
         worst_status = r_i
         worst_i = i
         worst_score = score
 
-# Big circle indicator (fills most of the page)
+# Big circle indicator
 fill = circle_fill(worst_status)
 st.markdown(
     f"""
@@ -292,7 +323,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Location + worst hour details (kept compact)
+# Location + worst hour details (compact)
 st.markdown(
     f"""
 <div style="margin-top:6px; margin-bottom:6px; font-size:14px; opacity:0.85;">
@@ -316,7 +347,7 @@ if daily_idx is not None:
     c3.metric("Max wind", f"{int(daily['wind_speed_10m_max'][daily_idx])} mph")
     c4.metric("Max gust", f"{int(daily['wind_gusts_10m_max'][daily_idx])} mph")
 
-# Next hours table (main detail)
+# Next hours table
 st.subheader("Next hours (mph)")
 rows = []
 for i in range(min(10, len(times))):
@@ -326,7 +357,7 @@ for i in range(min(10, len(times))):
             "Wind": int(round(wind[i])),
             "Gust": int(round(gust[i])),
             "Dir": deg_to_compass(wdir[i]),
-            "Kayak": compute_kayak_rating(wind[i], gust[i]),
+            "Kayak": compute_kayak_rating(wind[i], gust[i], big_water=big_water),
         }
     )
 st.dataframe(rows, use_container_width=True, hide_index=True)
