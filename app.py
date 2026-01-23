@@ -12,17 +12,21 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
 WIND_UNIT = "mph"
+
+# Text color inside the big circle should match the page background (dark),
+# not the circle fill color.
+PAGE_BG_DARK = "#0b0f12"
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.2.1"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.3.0"})
     r.raise_for_status()
     return r.json()
 
@@ -44,14 +48,6 @@ def deg_to_compass(deg: float) -> str:
     return dirs[i]
 
 
-def status_color(status: str) -> str:
-    if status == "GO":
-        return "#1b8f3a"
-    if status == "CAUTION":
-        return "#c08a00"
-    return "#b00020"
-
-
 def reverse_geocode_name(lat: float, lon: float) -> Optional[str]:
     try:
         data = http_get_json(
@@ -63,7 +59,7 @@ def reverse_geocode_name(lat: float, lon: float) -> Optional[str]:
             return None
         r = results[0]
         return f"{r.get('name','')}, {r.get('admin1','')}, {r.get('country','')}"
-    except:
+    except Exception:
         return None
 
 
@@ -71,7 +67,7 @@ def ip_location():
     try:
         data = http_get_json("https://ipapi.co/json/", {})
         return float(data["latitude"]), float(data["longitude"])
-    except:
+    except Exception:
         return None, None
 
 
@@ -125,10 +121,18 @@ def filter_to_day(hourly: dict, target: date) -> dict:
 
 def compute_kayak_rating(sustained_mph: float, gust_mph: float) -> str:
     if sustained_mph >= 16 or gust_mph >= 23:
-        return "DO NOT GO"
+        return "NO GO"
     if sustained_mph >= 11 or gust_mph >= 16:
         return "CAUTION"
     return "GO"
+
+
+def circle_fill(status: str) -> str:
+    if status == "GO":
+        return "#2ecc71"  # green
+    if status == "CAUTION":
+        return "#f1c40f"  # yellow
+    return "#e74c3c"      # red
 
 
 # ----------------------------
@@ -136,7 +140,54 @@ def compute_kayak_rating(sustained_mph: float, gust_mph: float) -> str:
 # ----------------------------
 st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
 
-st.title("Kayak Wind Advisor")
+# Smaller one-line header for mobile
+st.markdown(
+    """
+<style>
+/* Make header one line on mobile */
+.kwa-title {
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.05;
+  margin: 0 0 6px 0;
+  white-space: nowrap;
+}
+
+/* Big circle status */
+.kwa-circle-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+  margin-bottom: 10px;
+}
+
+.kwa-circle {
+  width: min(78vw, 360px);
+  height: min(78vw, 360px);
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.22);
+}
+
+.kwa-circle-text {
+  font-size: clamp(46px, 10vw, 92px);
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: """ + PAGE_BG_DARK + """;
+  text-transform: uppercase;
+}
+
+/* Tighten up spacing for mobile */
+.block-container { padding-top: 18px; }
+</style>
+<h1 class="kwa-title">Kayak Wind Advisor</h1>
+""",
+    unsafe_allow_html=True,
+)
+
 st.caption(f"Version {APP_VERSION}. Uses your location automatically. Wind in mph.")
 
 target_day = st.date_input("Choose a date", value=date.today())
@@ -173,7 +224,7 @@ try:
         lon = float(q["lon"])
         st.session_state["last_lat"] = lat
         st.session_state["last_lon"] = lon
-except:
+except Exception:
     pass
 
 # Fallback to cached
@@ -208,8 +259,12 @@ wind = safe_float_list(hourly_day.get("wind_speed_10m"))
 gust = safe_float_list(hourly_day.get("wind_gusts_10m"))
 wdir = safe_float_list(hourly_day.get("wind_direction_10m"))
 
+if not times:
+    st.warning("No hourly data returned for that date. Try another date.")
+    st.stop()
+
 # Find worst hour
-rank = {"GO": 0, "CAUTION": 1, "DO NOT GO": 2}
+rank = {"GO": 0, "CAUTION": 1, "NO GO": 2}
 worst_status = "GO"
 worst_i = 0
 worst_score = -1
@@ -224,35 +279,44 @@ for i in range(len(times)):
         worst_i = i
         worst_score = score
 
-# Top card
+# Big circle indicator (fills most of the page)
+fill = circle_fill(worst_status)
 st.markdown(
     f"""
-<div style="border-radius:16px; padding:16px; border:1px solid rgba(0,0,0,0.1);">
-  <div style="font-size:14px; opacity:0.8;">{place_name}</div>
-  <div style="font-size:34px; font-weight:700; color:{status_color(worst_status)};">{worst_status}</div>
-  <div style="font-size:16px;">
-    Worst hour: {int(round(wind[worst_i]))} mph, gusts {int(round(gust[worst_i]))} mph
-  </div>
-  <div style="font-size:13px; opacity:0.7;">
-    {times[worst_i].replace("T"," ")} - {deg_to_compass(wdir[worst_i])}
+<div class="kwa-circle-wrap">
+  <div class="kwa-circle" style="background:{fill};">
+    <div class="kwa-circle-text">{worst_status}</div>
   </div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-# Daily summary
+# Location + worst hour details (kept compact)
+st.markdown(
+    f"""
+<div style="margin-top:6px; margin-bottom:6px; font-size:14px; opacity:0.85;">
+  {place_name}
+</div>
+<div style="font-size:16px; margin-bottom:10px;">
+  Worst hour: {int(round(wind[worst_i]))} mph wind, {int(round(gust[worst_i]))} mph gusts, {deg_to_compass(wdir[worst_i])}
+  <span style="opacity:0.75;">({times[worst_i].replace("T"," ")})</span>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# Daily summary (quick)
 daily_time = daily.get("time") or []
 daily_idx = daily_time.index(target_day.isoformat()) if target_day.isoformat() in daily_time else None
-
 if daily_idx is not None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Temp", f"{int(daily['temperature_2m_max'][daily_idx])}/{int(daily['temperature_2m_min'][daily_idx])} F")
-    c2.metric("Rain chance", f"{daily['precipitation_probability_max'][daily_idx]}%")
+    c2.metric("Rain", f"{daily['precipitation_probability_max'][daily_idx]}%")
     c3.metric("Max wind", f"{int(daily['wind_speed_10m_max'][daily_idx])} mph")
     c4.metric("Max gust", f"{int(daily['wind_gusts_10m_max'][daily_idx])} mph")
 
-# Next hours table (this is now the main detail view)
+# Next hours table (main detail)
 st.subheader("Next hours (mph)")
 rows = []
 for i in range(min(10, len(times))):
