@@ -12,7 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
 WIND_UNIT = "mph"
@@ -22,7 +22,7 @@ WIND_UNIT = "mph"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.2.0"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.2.1"})
     r.raise_for_status()
     return r.json()
 
@@ -252,7 +252,7 @@ if daily_idx is not None:
     c3.metric("Max wind", f"{int(daily['wind_speed_10m_max'][daily_idx])} mph")
     c4.metric("Max gust", f"{int(daily['wind_gusts_10m_max'][daily_idx])} mph")
 
-# Next hours table
+# Next hours table (this is now the main detail view)
 st.subheader("Next hours (mph)")
 rows = []
 for i in range(min(10, len(times))):
@@ -266,17 +266,3 @@ for i in range(min(10, len(times))):
         }
     )
 st.dataframe(rows, use_container_width=True, hide_index=True)
-
-# Chart
-st.subheader("Wind chart (mph)")
-import pandas as pd
-
-chart_df = pd.DataFrame(
-    {
-        "time": [t.replace("T", " ") for t in times],
-        "wind_mph": wind,
-        "gust_mph": gust,
-    }
-).set_index("time")
-
-st.line_chart(chart_df)
