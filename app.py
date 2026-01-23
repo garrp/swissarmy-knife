@@ -1,19 +1,19 @@
 # app.py
 # Kayak Compass
-# Version 1.0.5
+# Version 1.0.6
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
 
 from __future__ import annotations
 
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 OTHER_APP_URL = "https://fishing-tools.streamlit.app/"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
@@ -25,7 +25,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.5"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.6"})
     r.raise_for_status()
     return r.json()
 
@@ -114,6 +114,74 @@ def compute_kayak_rating(s: float, g: float, big_water: bool) -> str:
 
 def circle_fill(status: str) -> str:
     return {"GO": "#2ecc71", "CAUTION": "#f1c40f", "NO GO": "#e74c3c"}[status]
+
+
+def exposure_advice(temp_hi_f: int, temp_lo_f: int, max_wind_mph: int, big_water: bool) -> Tuple[str, List[str]]:
+    """
+    Simple air-temp exposure guidance (PNW focused).
+    Not a medical tool. Meant to nudge gear choices for cold, wind, and wet conditions.
+    """
+    # Basic risk buckets based on air temps. Wind bumps risk slightly.
+    risk = "LOW"
+    if temp_lo_f <= 32 or temp_hi_f <= 40:
+        risk = "HIGH"
+    elif temp_lo_f <= 40 or temp_hi_f <= 50:
+        risk = "MODERATE"
+
+    if max_wind_mph >= 15 and risk == "LOW":
+        risk = "MODERATE"
+    elif max_wind_mph >= 15 and risk == "MODERATE":
+        risk = "HIGH"
+
+    # Big water: treat the same air temps as one step riskier
+    if big_water and risk == "LOW":
+        risk = "MODERATE"
+    elif big_water and risk == "MODERATE":
+        risk = "HIGH"
+
+    lines: List[str] = []
+
+    if risk == "LOW":
+        lines.append("Comfort looks decent, but stay dry and keep a wind layer handy.")
+        lines.append("If you get soaked, temps can feel a lot colder on the paddle back.")
+    elif risk == "MODERATE":
+        lines.append("Cool/cold exposure risk. Dress for wind and the chance of getting wet.")
+        lines.append("Plan for a slower return if you get tired or the wind picks up.")
+    else:
+        lines.append("High cold exposure risk. Even a small mistake can get serious fast.")
+        lines.append("If you would be miserable standing wet on shore, upgrade your gear.")
+
+    # Gear suggestions (short, practical)
+    gear: List[str] = []
+    if risk == "LOW":
+        gear += [
+            "Wind shell or light rain jacket",
+            "Dry bag with spare layer",
+        ]
+    elif risk == "MODERATE":
+        gear += [
+            "Waterproof/windproof outer layer",
+            "Insulating mid-layer (fleece or puffy)",
+            "Warm hat and gloves",
+            "Dry bag with spare clothes",
+        ]
+    else:
+        gear += [
+            "Drysuit (best) or wetsuit if appropriate",
+            "Insulating layers (avoid cotton)",
+            "Warm hat, gloves, and thick socks",
+            "Dry bag: full spare set plus towel",
+            "Hand warmers if you use them",
+        ]
+
+    # Always-good safety reminders
+    gear += [
+        "PFD worn (not stored)",
+        "Whistle and a light (headlamp or small nav light)",
+        "Phone in a waterproof case",
+    ]
+
+    return risk, lines + ["Suggested gear: " + ", ".join(gear) + "."]
 
 
 # ----------------------------
@@ -291,7 +359,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Daily forced 2x2 table
+# Daily forced 2x2 table + exposure section
 daily_time = daily.get("time") or []
 if target_day.isoformat() in daily_time:
     d_idx = daily_time.index(target_day.isoformat())
@@ -329,6 +397,12 @@ if target_day.isoformat() in daily_time:
 """,
         unsafe_allow_html=True,
     )
+
+    # Exposure guidance at bottom of the weather
+    risk, advice_lines = exposure_advice(t_hi, t_lo, max_w, big_water)
+    st.markdown(f"### Exposure (air temp) - {risk}")
+    for line in advice_lines:
+        st.write(line)
 
 # Next hours
 st.subheader("Next hours (mph)")
