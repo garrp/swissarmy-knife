@@ -1,5 +1,6 @@
 # app.py
-# Kayak Wind Advisor (Streamlit)
+# Kayak Compass
+# Version 1.0.0
 # ASCII ONLY. No Unicode. No smart quotes. No special dashes.
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.0.0"
 
 FORECAST_TIMEZONE = "America/Los_Angeles"
 WIND_UNIT = "mph"
@@ -26,7 +27,7 @@ PAGE_BG_DARK = "#0b0f12"
 # Helpers
 # ----------------------------
 def http_get_json(url: str, params: dict, timeout: int = 20) -> dict:
-    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakWindAdvisor/1.4.0"})
+    r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "KayakCompass/1.0.0"})
     r.raise_for_status()
     return r.json()
 
@@ -58,7 +59,12 @@ def reverse_geocode_name(lat: float, lon: float) -> Optional[str]:
         if not results:
             return None
         r = results[0]
-        return f"{r.get('name','')}, {r.get('admin1','')}, {r.get('country','')}"
+        # Keep it compact for mobile
+        name = (r.get("name") or "").strip()
+        admin1 = (r.get("admin1") or "").strip()
+        if name and admin1:
+            return f"{name}, {admin1}"
+        return name or None
     except Exception:
         return None
 
@@ -81,8 +87,6 @@ def fetch_forecast(lat: float, lon: float) -> dict:
         "temperature_unit": "fahrenheit",
         "hourly": ",".join(
             [
-                "temperature_2m",
-                "precipitation_probability",
                 "wind_speed_10m",
                 "wind_gusts_10m",
                 "wind_direction_10m",
@@ -120,24 +124,19 @@ def filter_to_day(hourly: dict, target: date) -> dict:
 
 
 def compute_kayak_rating(sustained_mph: float, gust_mph: float, big_water: bool) -> str:
-    # Base (small water typical):
+    # Base thresholds (typical small water):
     # GO: sustained 0-10 and gust <= 15
     # CAUTION: sustained 11-15 or gust 16-22
     # NO GO: sustained >= 16 or gust >= 23
     go_s = 10
     go_g = 15
-    caution_s = 15
-    caution_g = 22
     nogo_s = 16
     nogo_g = 23
 
-    # Big water: shift more conservative (lower thresholds)
-    # This is intentionally simple and predictable.
+    # Big water: more conservative, simple shift
     if big_water:
         go_s = 8
         go_g = 12
-        caution_s = 12
-        caution_g = 18
         nogo_s = 13
         nogo_g = 19
 
@@ -159,36 +158,39 @@ def circle_fill(status: str) -> str:
 # ----------------------------
 # UI
 # ----------------------------
-st.set_page_config(page_title="Kayak Wind Advisor", layout="centered")
+st.set_page_config(page_title="Kayak Compass", layout="centered")
 
 # Move header down so it is not clipped by the mobile browser top UI
 st.markdown(
     """
 <style>
-/* Add safe top padding so the title is always visible on mobile */
+/* Safe top padding so the title is visible on mobile browsers */
 .block-container {
   padding-top: 44px !important;
   padding-bottom: 16px !important;
 }
 
-/* One-line header */
-.kwa-title {
+/* One-line, horizontally squished header */
+.kc-title {
   font-size: 30px;
   font-weight: 900;
   line-height: 1.05;
   margin: 0 0 6px 0;
   white-space: nowrap;
+  letter-spacing: -1.2px;
+  transform: scaleX(0.90);
+  font-family: "Trebuchet MS", "Arial Rounded MT Bold", cursive;
 }
 
 /* Big circle */
-.kwa-circle-wrap {
+.kc-circle-wrap {
   width: 100%;
   display: flex;
   justify-content: center;
   margin-top: 10px;
   margin-bottom: 10px;
 }
-.kwa-circle {
+.kc-circle {
   width: min(78vw, 360px);
   height: min(78vw, 360px);
   border-radius: 9999px;
@@ -197,21 +199,23 @@ st.markdown(
   justify-content: center;
   box-shadow: 0 10px 30px rgba(0,0,0,0.22);
 }
-.kwa-circle-text {
+.kc-circle-text {
   font-size: clamp(46px, 10vw, 92px);
   font-weight: 900;
   letter-spacing: 1px;
-  color: """ + PAGE_BG_DARK + """;
+  color: """
+    + PAGE_BG_DARK
+    + """;
   text-transform: uppercase;
 }
 </style>
 
-<h1 class="kwa-title">Kayak Wind Advisor</h1>
+<h1 class="kc-title">Kayak Compass</h1>
 """,
     unsafe_allow_html=True,
 )
 
-st.caption(f"Version {APP_VERSION}. Uses your location automatically. Wind in mph.")
+st.caption(f"Version {APP_VERSION}. Instant wind-based kayak rating. Wind in mph.")
 
 # Controls (minimal)
 col_a, col_b = st.columns([2, 1])
@@ -301,6 +305,8 @@ for i in range(len(times)):
     s = wind[i]
     g = gust[i]
     r_i = compute_kayak_rating(s, g, big_water=big_water)
+
+    # Mild scoring to break ties (gustiness matters)
     score = int(round(4.0 * s + 2.0 * max(0.0, g - s)))
     if big_water:
         score += 12
@@ -314,9 +320,9 @@ for i in range(len(times)):
 fill = circle_fill(worst_status)
 st.markdown(
     f"""
-<div class="kwa-circle-wrap">
-  <div class="kwa-circle" style="background:{fill};">
-    <div class="kwa-circle-text">{worst_status}</div>
+<div class="kc-circle-wrap">
+  <div class="kc-circle" style="background:{fill};">
+    <div class="kc-circle-text">{worst_status}</div>
   </div>
 </div>
 """,
